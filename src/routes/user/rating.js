@@ -1,95 +1,74 @@
-import DomParser from "dom-parser";
-import qs from "qs";
-import apiRequestRawHtml from "../../helpers/apiRequestRawHtml";
+import { parse } from 'node-html-parser';
+import apiRequestRawHtml from '../../helpers/apiRequest.js';
 
 const SORT_OPTIONS = {
   most_recent: "date_added,desc",
   oldest: "date_added,asc",
   top_rated: "your_rating,desc",
-  worst_rated: "your_rating,asc",
+  worst_rated: "your_rating,asc"
 };
 
-export default async function userRating(c) {
-  let errorStatus = 500;
+export default async function userRating(req, env, ctx, params) {
+  const userId = params.id;
+  const url = new URL(req.url);
+  const sortParam = url.searchParams.get("sort");
+  const ratingFilter = url.searchParams.get("ratingFilter");
+
+  const sort = SORT_OPTIONS[sortParam] || SORT_OPTIONS.most_recent;
+
+  const queryParams = new URLSearchParams({ sort });
+  if (ratingFilter) queryParams.append("ratingFilter", ratingFilter);
+
+  const constructedUrl = `https://www.imdb.com/user/${userId}/ratings?${queryParams.toString()}`;
 
   try {
-    const userId = c.req.param("id");
-
-    const sort =
-      SORT_OPTIONS[c.req.query("sort") || ""] || Object.values(SORT_OPTIONS)[0];
-    const ratingFilter = c.req.query("ratingFilter") || null;
-
-    const query = qs.stringify({
-      sort,
-      ratingFilter: ratingFilter || undefined,
-    });
-
-    const constructedUrl = `https://www.imdb.com/user/${userId}/ratings?${query}`;
-
     const response = await fetch(constructedUrl, {
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         accept: "text/html",
-        "accept-language": "en-US",
-      },
+        "accept-language": "en-US"
+      }
     });
 
     if (!response.ok) {
-      errorStatus = response.status;
-      throw new Error(
-        errorStatus === 404
-          ? "Seems like user rating is not exixts."
-          : "Error fetching user rating."
-      );
+      return new Response(JSON.stringify({ message: "User rating not found" }), { status: 404 });
     }
 
     const rawHtml = await response.text();
-    const parser = new DomParser();
-    const dom = parser.parseFromString(rawHtml);
-
+    const dom = parse(rawHtml);
     let total_ratings = 0;
     let total_filtered_ratings = 0;
     let all_ratings = [];
 
     try {
-      const totalRatings = rawHtml.match(/span> [(]of (\d+)[)] titles/)[1];
-      total_ratings = parseInt(totalRatings);
-    } catch (_) {}
+      const match = rawHtml.match(/span> [(]of (\d+)[)] titles/);
+      total_ratings = match ? parseInt(match[1]) : 0;
+    } catch {}
 
     try {
-      const totalFilteredRatings = dom.getElementById(
-        "lister-header-current-size"
-      ).textContent;
-      total_filtered_ratings = parseInt(totalFilteredRatings);
-    } catch (_) {}
+      const filtered = dom.querySelector("#lister-header-current-size")?.text.trim();
+      total_filtered_ratings = filtered ? parseInt(filtered) : 0;
+    } catch {}
 
     try {
-      const listNode = dom.getElementById("ratings-container");
-      const lists = listNode
-        .getElementsByClassName("mode-detail")
-        .slice(0, 100); // limit to 100
+      const listNode = dom.querySelector("#ratings-container");
+      const lists = listNode?.querySelectorAll(".mode-detail") ?? [];
 
-      for (const node of lists) {
+      for (const node of lists.slice(0, 100)) {
         const parsed = parseContent(node);
         if (parsed) all_ratings.push(parsed);
       }
-    } catch (_) {}
+    } catch {}
 
     const allReviews = await parseReviews(userId);
 
-    // merge reviews
     all_ratings = all_ratings.map((rating) => {
-      let review = allReviews.find((review) => review.title_id === rating.id);
+      const review = allReviews.find((r) => r.title_id === rating.id);
       if (review) delete review.title_id;
-
-      return {
-        ...rating,
-        review: review || null,
-      };
+      return { ...rating, review: review || null };
     });
 
-    const result = {
+    return Response.json({
       id: userId,
       imdb: constructedUrl,
       user_api_path: `/user/${userId}`,
@@ -97,159 +76,98 @@ export default async function userRating(c) {
       allRatingFilters: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
       total_user_ratings: total_ratings,
       total_filtered_ratings,
-      ratings: all_ratings,
-    };
-
-    return c.json(result);
-  } catch (error) {
-    c.status(errorStatus);
-    return c.json({
-      message: error.message,
+      ratings: all_ratings
     });
+  } catch (error) {
+    return new Response(JSON.stringify({ message: error.message }), { status: 500 });
   }
 }
 
 async function parseReviews(userId) {
   try {
-    let data = [];
-    const rawHtml = await apiRequestRawHtml(
-      `https://www.imdb.com/user/${userId}/reviews`
-    );
+    const rawHtml = await apiRequestRawHtml(`https://www.imdb.com/user/${userId}/reviews`);
+    const dom = parse(rawHtml);
+    const nodes = dom.querySelectorAll(".lister-item");
 
-    const parser = new DomParser();
-    const dom = parser.parseFromString(rawHtml);
+    return nodes.map((node) => {
+      const id = node.getAttribute("data-review-id");
+      const imdb = node.getAttribute("data-vote-url");
 
-    const allLists = dom.getElementsByClassName("lister-item");
-
-    for (const node of allLists) {
-      try {
-        const id = node.getAttribute("data-review-id");
-        const imdb = node.getAttribute("data-vote-url");
-        const titleId = imdb.match(/title\/(.*)\/review/)[1];
-        const reviewContent =
-          node.getElementsByClassName("show-more__control")[0];
-        const reviewTitle = node.getElementsByClassName("title")[0];
-
-        let review_date = node
-          .getElementsByClassName("review-date")[0]
-          .textContent.trim();
-        review_date = new Date(review_date).toISOString();
-
-        data.push({
-          title_id: titleId,
-
-          id,
-          date: review_date,
-          heading: reviewTitle.textContent.trim(),
-          content: reviewContent.textContent.trim(),
-          reviewLink: `https://www.imdb.com/review/${id}`,
-        });
-      } catch (_) {
-        console.error(`Reviews error:`, _);
+      let titleId = null;
+      if (imdb) {
+        const match = imdb.match(/title\/(.*?)\/review/);
+        if (match && match[1]) titleId = match[1];
       }
-    }
 
-    return data;
-  } catch (error) {
-    console.error(`Reviews error:`, error);
+      const reviewDate = new Date(node.querySelector(".review-date")?.text.trim()).toISOString();
+
+      return {
+        title_id: titleId,
+        id,
+        date: reviewDate,
+        heading: node.querySelector(".title")?.text.trim(),
+        content: node.querySelector(".show-more__control")?.text.trim(),
+        reviewLink: `https://www.imdb.com/review/${id}`
+      };
+    });
+  } catch {
     return [];
   }
 }
 
 function parseContent(node) {
   try {
-    let object = {};
+    const titleNode = node.querySelector(".lister-item-header a");
+    const titleUrl = titleNode?.getAttribute("href") ?? "";
+    const match = titleUrl.match(/title\/(.*?)\//);
+    const titleId = match ? match[1] : null;
 
-    const nodeInnerHtml = node.innerHTML;
-    const titleNode = node.getElementsByClassName("lister-item-header")[0];
-    const title = titleNode.getElementsByTagName("a")[0];
-    const titleUrl = title.getAttribute("href");
-    const titleId = titleUrl.match(/title\/(.*)\//)[1];
+    const object = {
+      id: titleId,
+      imdb: `https://www.imdb.com/title/${titleId}`,
+      api_path: `/title/${titleId}`,
+      review_api_path: `/reviews/${titleId}`,
+      title: titleNode?.text.trim()
+    };
 
-    object.id = titleId;
-    object.imdb = `https://www.imdb.com/title/${titleId}`;
-    object.api_path = `/title/${titleId}`;
-    object.review_api_path = `/reviews/${titleId}`;
-    object.title = title.textContent.trim();
+    const userRating = node.querySelector(".ipl-rating-star--other-user .ipl-rating-star__rating");
+    object.userRating = parseInt(userRating?.text.trim());
 
-    const userRatingNode = node.getElementsByClassName(
-      "ipl-rating-star--other-user"
-    )[0];
-    const userRating = userRatingNode.getElementsByClassName(
-      "ipl-rating-star__rating"
-    )[0];
+    const html = node.innerHTML;
+    const dateMatch = html.match(/>Rated on (.*?)<\/p>/);
+    object.date = dateMatch ? new Date(dateMatch[1]).toISOString() : null;
 
-    object.userRating = parseInt(userRating.textContent.trim());
+    const plotMatch = html.match(/<p class(?:=""|)>\s*(.*?)<\/p>/);
+    object.plot = plotMatch ? plotMatch[1].trim() : null;
 
-    try {
-      const ratedOn = nodeInnerHtml.match(/>Rated on (.*)<[\/]p>/)[1];
-      object.date = new Date(ratedOn).toISOString();
-    } catch (error) {
-      object.date = null;
-    }
+    const imageNode = node.querySelector(".loadlate");
+    const img = imageNode?.getAttribute("loadlate");
+    object.image = img;
+    object.image_large = img?.replace(/._.*_/, "");
 
-    try {
-      const plot = nodeInnerHtml.match(/<p class(?:=""|)>\s(.*)<[\/]p>/)[1];
-      object.plot = plot.trim();
-    } catch (error) {
-      object.plot = null;
-    }
+    object.genre = (node.querySelector(".genre")?.textContent ?? "")
+      .split(",")
+      .map((g) => g.trim())
+      .filter(Boolean);
 
     try {
-      const image = node.getElementsByClassName("loadlate")[0];
-      object.image = image.getAttribute("loadlate");
-      object.image_large = object.image.replace(/._.*_/, "");
-    } catch (error) {
-      object.image = null;
-      object.image_large = null;
-    }
-
-    try {
-      const genre = node.getElementsByClassName("genre")[0].textContent;
-      object.genre = genre.split(",").map((g) => g.trim());
-    } catch (_) {
-      object.genre = ["Error"];
-    }
-
-    try {
-      const allUserRating = node.getElementsByClassName(
-        "ipl-rating-star__rating"
-      )[0];
-
-      let votes = -1;
-      try {
-        votes = node.getElementsByName("nv")[0].getAttribute("data-value");
-      } catch (__) {}
-
+      const ratingElem = node.querySelector(".ipl-rating-star__rating");
+      const votes = node.querySelector("[name='nv']")?.getAttribute("data-value");
       object.rating = {
-        star: parseFloat(allUserRating.textContent.trim()),
-        count: parseInt(votes),
+        star: parseFloat(ratingElem?.textContent.trim()),
+        count: parseInt(votes ?? "-1")
       };
-    } catch (error) {
-      object.rating = {
-        count: -1,
-        star: -1,
-      };
+    } catch {
+      object.rating = { count: -1, star: -1 };
     }
 
-    try {
-      object.contentRating =
-        node.getElementsByClassName("certificate")[0].textContent;
-    } catch (_) {
-      object.contentRating = null;
-    }
-
-    try {
-      object.runtime = node.getElementsByClassName("runtime")[0].textContent;
-      object.runtimeSeconds = parseRuntimeIntoSeconds(object.runtime);
-    } catch (_) {
-      object.runtime = null;
-      object.runtimeSeconds = -1;
-    }
+    object.contentRating = node.querySelector(".certificate")?.textContent;
+    const runtime = node.querySelector(".runtime")?.textContent;
+    object.runtime = runtime;
+    object.runtimeSeconds = parseRuntimeIntoSeconds(runtime);
 
     return object;
-  } catch (error) {
-    console.log(error);
+  } catch {
     return null;
   }
 }
@@ -257,19 +175,12 @@ function parseContent(node) {
 function parseRuntimeIntoSeconds(runtime) {
   try {
     let seconds = 0;
-
-    const hrMatch = runtime.match(/(\d+)\shr/);
-    if (hrMatch) {
-      seconds += parseInt(hrMatch[1]) * 60 * 60;
-    }
-
-    const minMatch = runtime.match(/(\d+)\smin/);
-    if (minMatch) {
-      seconds += parseInt(minMatch[1]) * 60;
-    }
-
-    return Math.floor(seconds);
-  } catch (error) {
+    const hr = runtime.match(/(\d+)\shr/);
+    const min = runtime.match(/(\d+)\smin/);
+    if (hr) seconds += parseInt(hr[1]) * 3600;
+    if (min) seconds += parseInt(min[1]) * 60;
+    return seconds;
+  } catch {
     return -1;
   }
 }

@@ -1,36 +1,32 @@
-import config from "../../config";
-
-export default async function cache(c, next) {
-  const key = c.req.url;
-  const cache = await caches.default;
-  const response = await cache.match(key);
-
-  function getCacheTTL() {
-    try {
-      let url = key.toString().toLowerCase();
-      if (url.includes("/reviews")) return 60 * 60 * 24;
-      if (url.includes("/title")) return 60 * 60 * 24;
-      if (url.includes("/search")) return 60 * 60 * 24 * 2;
-    } catch (_) {}
-
-    return 86400;
+export function withCache() {
+    return {
+      async fetch(request, env, ctx) {
+        const cache = caches.default;
+        const cacheKey = new Request(request.url, request);
+        const cachedResponse = await cache.match(cacheKey);
+  
+        const getCacheTTL = () => {
+          const url = request.url.toLowerCase();
+          if (url.includes("/reviews")) return 86400;
+          if (url.includes("/title")) return 86400;
+          if (url.includes("/search")) return 172800;
+          return 86400;
+        };
+  
+        if (cachedResponse) {
+          return cachedResponse;
+        }
+  
+        // ctx.next() does NOT exist — call the next handler manually
+        const response = await fetch(request);
+  
+        if (response.status === 200 && env?.CACHE_DISABLED !== "true") {
+          response.headers.set("Cache-Control", `public, max-age=${getCacheTTL()}`);
+          ctx.waitUntil(cache.put(cacheKey, response.clone()));
+        }
+  
+        return response;
+      }
+    };
   }
-
-  if (!response) {
-    await next();
-
-    if (c.res.status === 200 && !config.cacheDisabled) {
-      c.res.headers.append("Cache-Control", `public, max-age=${getCacheTTL()}`);
-      await cache.put(key, c.res.clone());
-    }
-
-    return;
-  } else {
-    // it was throwing Immutable error
-    for (let [key, value] of response.headers.entries()) {
-      c.res.headers.set(key, value);
-    }
-
-    return c.json(await response.json());
-  }
-}
+  

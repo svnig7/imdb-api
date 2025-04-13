@@ -1,79 +1,64 @@
-import { Hono } from "hono";
-import { apiRequestJson } from "../helpers/apiRequestRawHtml";
+import { apiRequestJson } from '../helpers/apiRequest.js';
 
-const search = new Hono();
+export default async function search(req) {
+  const url = new URL(req.url);
+  const query = url.searchParams.get("query");
 
-search.get("/", async (c) => {
+  if (!query) {
+    return new Response(JSON.stringify({ message: "Query param is required" }), { status: 400 });
+  }
+
   try {
-    let query = c.req.query("query");
-    if (!query) throw new Error("Query param is required");
+    const data = await apiRequestJson(`https://v3.sg.media-imdb.com/suggestion/x/${query}.json?includeVideos=0`);
 
-    let data = await apiRequestJson(
-      `https://v3.sg.media-imdb.com/suggestion/x/${query}.json?includeVideos=0`
-    );
+    const titles = [];
 
-    let response = {
-      query: query,
-    };
+    for (const node of data.d || []) {
+      if (!["movie", "tvSeries", "tvMovie"].includes(node.qid)) continue;
 
-    let titles = [];
+      const imageObj = {
+        image: null,
+        image_large: null,
+      };
 
-    data.d.forEach((node) => {
-      try {
-        if (!node.qid) return;
-        if (!["movie", "tvSeries", "tvMovie"].includes(node.qid)) return;
-
-        let imageObj = {
-          image: null,
-          image_large: null,
-        };
-
-        if (node.i) {
-          imageObj.image_large = node.i.imageUrl;
-
-          try {
-            let width = Math.floor((396 * node.i.width) / node.i.height);
-
-            imageObj.image = node.i.imageUrl.replace(
-              /[.]_.*_[.]/,
-              `._V1_UY396_CR6,0,${width},396_AL_.`
-            );
-          } catch (_) {
-            imageObj.image = imageObj.image_large;
-          }
+      if (node.i) {
+        imageObj.image_large = node.i.imageUrl;
+        try {
+          const width = Math.floor((396 * node.i.width) / node.i.height);
+          imageObj.image = node.i.imageUrl.replace(
+            /[.]_.*_[.]/,
+            `._V1_UY396_CR6,0,${width},396_AL_.`
+          );
+        } catch {
+          imageObj.image = imageObj.image_large;
         }
-
-        titles.push({
-          id: node.id,
-          title: node.l,
-          year: node.y,
-          type: node.qid,
-          ...imageObj,
-          api_path: `/title/${node.id}`,
-          imdb: `https://www.imdb.com/title/${node.id}`,
-        });
-      } catch (_) {
-        console.log(_);
       }
+
+      titles.push({
+        id: node.id,
+        title: node.l,
+        year: node.y,
+        type: node.qid,
+        ...imageObj,
+        api_path: `/title/${node.id}`,
+        imdb: `https://www.imdb.com/title/${node.id}`,
+      });
+    }
+
+    return Response.json({
+      query,
+      message: `Found ${titles.length} titles`,
+      results: titles,
     });
-
-    response.message = `Found ${titles.length} titles`;
-    response.results = titles;
-
-    return c.json(response);
   } catch (error) {
-    c.status(500);
-    let errorMessage = error.message;
-    if (error.message.includes("Too many"))
-      errorMessage =
-        "Too many requests error from IMDB, please try again later";
+    const errorMessage = error.message.includes("Too many")
+      ? "Too many requests error from IMDB, please try again later"
+      : error.message;
 
-    return c.json({
+    return new Response(JSON.stringify({
       query: null,
       results: [],
       message: errorMessage,
-    });
+    }), { status: 500 });
   }
-});
-
-export default search;
+}

@@ -1,176 +1,87 @@
-import { Hono } from "hono";
-import DomParser from "dom-parser";
-import { decode as entityDecoder } from "html-entities";
-import apiRequestRawHtml from "../helpers/apiRequestRawHtml";
-const reviews = new Hono();
+import { parse } from 'node-html-parser';
+import { decode } from 'html-entities';
+import apiRequestRawHtml from '../helpers/apiRequest.js';
 
-reviews.get("/:id", async (c) => {
+const optionsMapper = [
+  { key: "helpfulnessScore", name: "helpfulness" },
+  { key: "submissionDate", name: "date" },
+  { key: "totalVotes", name: "votes" },
+  { key: "userRating", name: "rating" }
+];
+
+export default async function reviews(req, env, ctx, params) {
   try {
-    const id = c.req.param("id");
+    const id = params.id;
+    const url = new URL(req.url);
+    const optionParam = url.searchParams.get("option");
+    const sortOrder = url.searchParams.get("sortOrder") === "asc" ? "asc" : "desc";
+    const nextKey = url.searchParams.get("nextKey");
+
     let option = optionsMapper[0];
-    try {
-      let getOption = optionsMapper.find(
-        (option) => option.name === c.req.query("option")
-      );
-      if (getOption) option = getOption;
-    } catch (_) {}
+    const foundOption = optionsMapper.find((opt) => opt.name === optionParam);
+    if (foundOption) option = foundOption;
 
-    let sortOrder = c.req.query("sortOrder") === "asc" ? "asc" : "desc";
-    let nextKey = c.req.query("nextKey");
+    const fetchUrl = `https://www.imdb.com/title/${id}/reviews/_ajax?sort=${option.key}&dir=${sortOrder}` + (nextKey ? `&paginationKey=${nextKey}` : "");
+    const rawHtml = await apiRequestRawHtml(fetchUrl);
+    const dom = parse(rawHtml);
+    const items = dom.querySelectorAll(".imdb-user-review");
 
-    let reviews = [];
-
-    let parser = new DomParser();
-    let rawHtml = await apiRequestRawHtml(
-      `https://www.imdb.com/title/${id}/reviews/_ajax?sort=${
-        option.key
-      }&dir=${sortOrder}${nextKey ? `&paginationKey=${nextKey}` : ""}`
-    );
-    let dom = parser.parseFromString(rawHtml);
-
-    let item = dom.getElementsByClassName("imdb-user-review");
-
-    item.forEach((node) => {
+    const reviewsArr = items.map((node) => {
       try {
-        let review = {};
+        const review = {
+          id: node.getAttribute("data-review-id") ?? null,
+          reviewLink: `https://www.imdb.com/review/${node.getAttribute("data-review-id")}`
+        };
 
-        try {
-          let reviewId = node.getAttribute("data-review-id");
-          review.id = reviewId;
-        } catch (_) {
-          review.id = null;
-        }
+        const authorNode = node.querySelector(".display-name-link");
+        review.author = decode(authorNode?.text?.trim() || "Anonymous");
+        const authorUrl = authorNode?.querySelector("a")?.getAttribute("href");
+        review.authorUrl = authorUrl ? `https://www.imdb.com${authorUrl}` : null;
+        review.user_api_path = authorUrl?.match(/\/user\/(.*?)\//)?.[1] ? `/user/${authorUrl.match(/\/user\/(.*?)\//)[1]}` : null;
 
-        try {
-          let author = node.getElementsByClassName("display-name-link")[0];
+        const dateNode = node.querySelector(".review-date");
+        review.date = dateNode ? new Date(dateNode.text.trim()).toISOString() : null;
 
-          review.author = entityDecoder(author.textContent.trim(), {
-            level: "html5",
-          });
+        const starsText = node.querySelector(".ipl-ratings-bar")?.textContent;
+        review.stars = starsText ? parseInt(starsText.match(/\\d+/)?.[0] || "0") : 0;
 
-          review.authorUrl =
-            "https://www.imdb.com" +
-            author.getElementsByTagName("a")[0].getAttribute("href");
-        } catch (_) {
-          if (!review.author) review.author = "Anonymous";
-          if (!review.authorUrl) review.authorUrl = null;
-        }
+        review.heading = decode(node.querySelector(".title")?.text?.trim() ?? "");
+        review.content = decode(node.querySelector(".text")?.text?.trim() ?? "");
 
-        try {
-          review.user_api_path =
-            "/user/" + review.authorUrl.match(/\/user\/(.*)\//)[1];
-        } catch (error) {
-          review.user_api_path = null;
-        }
+        const helpfulText = node.querySelector(".actions")?.textContent?.trim() ?? "";
+        const [helpfulVotes, totalVotes] = helpfulText.match(/\\d+/g) || [0, 0];
+        review.helpfulNess = {
+          votes: parseInt(totalVotes),
+          votedAsHelpful: parseInt(helpfulVotes),
+          votedAsHelpfulPercentage: totalVotes > 0 ? Math.round((helpfulVotes / totalVotes) * 100) : 0,
+        };
 
-        try {
-          let reviewDate = node.getElementsByClassName("review-date")[0];
-          reviewDate = reviewDate.textContent.trim();
-          review.date = new Date(reviewDate).toISOString();
-        } catch (error) {
-          review.date = null;
-        }
-
-        try {
-          let stars =
-            node.getElementsByClassName("ipl-ratings-bar")[0].textContent;
-          let match = stars.match(/\d+/g);
-          review.stars = parseInt(match[0]);
-        } catch (_) {
-          review.stars = 0;
-        }
-
-        try {
-          let heading = node.getElementsByClassName("title")[0];
-          review.heading = entityDecoder(heading.textContent.trim(), {
-            level: "html5",
-          });
-        } catch (_) {
-          review.heading = null;
-        }
-
-        try {
-          let content = node.getElementsByClassName("text")[0];
-          review.content = entityDecoder(content.textContent.trim(), {
-            level: "html5",
-          });
-        } catch (_) {
-          review.content = null;
-        }
-
-        try {
-          let helpfulNess = node
-            .getElementsByClassName("actions")[0]
-            .textContent.trim();
-
-          //  text will be like this '223 out of 280 found this helpful'
-          let match = helpfulNess.match(/\d+/g);
-
-          review.helpfulNess = {
-            votes: parseInt(match[1]),
-            votedAsHelpful: parseInt(match[0]),
-            votedAsHelpfulPercentage:
-              Math.round((parseInt(match[0]) / parseInt(match[1])) * 100) || 0,
-          };
-        } catch (_) {
-          review.helpfulNess = {
-            votes: 0,
-            votedAsHelpful: 0,
-            votedAsHelpfulPercentage: 0,
-          };
-        }
-
-        review.reviewLink = `https://www.imdb.com/review/${review.id}`;
-
-        reviews.push(review);
-      } catch (__) {}
-    });
+        return review;
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
 
     let next = null;
+    const morePage = dom.querySelector(".load-more-data");
+    if (morePage) {
+      const nextKeyData = morePage.getAttribute("data-key");
+      next = `/reviews/${id}?option=${option.name}&sortOrder=${sortOrder}&nextKey=${nextKeyData}`;
+    }
 
-    try {
-      let morePage = dom.getElementsByClassName("load-more-data")[0];
-      next = morePage.getAttribute("data-key");
-      next = `/reviews/${id}?option=${option.name}&sortOrder=${sortOrder}&nextKey=${next}`;
-    } catch (_) {}
-
-    let result = {
+    const result = {
       id,
       imdb: `https://www.imdb.com/title/${id}`,
       option: option.name,
       sortOrder,
-      availableOptions: optionsMapper.map((option) => option.name),
+      availableOptions: optionsMapper.map((opt) => opt.name),
       availableSortOrders: ["asc", "desc"],
-      reviews,
-      next_api_path: next,
+      reviews: reviewsArr,
+      next_api_path: next
     };
 
-    return c.json(result);
+    return Response.json(result);
   } catch (error) {
-    c.status(500);
-    return c.json({
-      message: error.message,
-    });
+    return new Response(JSON.stringify({ message: error.message }), { status: 500 });
   }
-});
-
-export default reviews;
-
-const optionsMapper = [
-  {
-    key: "helpfulnessScore",
-    name: "helpfulness",
-  },
-  {
-    key: "submissionDate",
-    name: "date",
-  },
-  {
-    key: "totalVotes",
-    name: "votes",
-  },
-  {
-    key: "userRating",
-    name: "rating",
-  },
-];
+}

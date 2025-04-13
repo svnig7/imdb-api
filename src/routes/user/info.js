@@ -1,95 +1,51 @@
-import DomParser from "dom-parser";
+import { parse } from 'node-html-parser';
 
-export default async function userInfo(c) {
-  let errorStatus = 500;
-
+export default async function userInfo(req, env, ctx, params) {
+  const userId = params.id;
   try {
-    const userId = c.req.param("id");
     const response = await fetch(`https://www.imdb.com/user/${userId}`, {
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         accept: "text/html",
-        "accept-language": "en-US",
-      },
+        "accept-language": "en-US"
+      }
     });
 
     if (!response.ok) {
-      errorStatus = response.status;
-      throw new Error(
-        errorStatus === 404
-          ? "Seems like user is not exixts."
-          : "Error fetching user info."
-      );
+      return new Response(JSON.stringify({ message: "User not found" }), { status: 404 });
     }
 
     const rawHtml = await response.text();
-    const parser = new DomParser();
-    const dom = parser.parseFromString(rawHtml);
+    const dom = parse(rawHtml);
+    const nameMatch = rawHtml.match(/<h1>(.*?)<\/h1>/);
 
-    let data = {};
+    const sinceMatch = rawHtml.match(/IMDb member since (.*?)<\/div>/);
 
-    try {
-      const name = rawHtml.match(/<h1>(.*)<\/h1>/)[1];
-      data.name = name || null;
-    } catch (__) {
-      data.name = null;
+    const imageElem = dom.querySelector("#avatar");
+
+    const data = {
+      id: userId,
+      imdb: `https://www.imdb.com/user/${userId}`,
+      ratings_api_path: `/user/${userId}/ratings`,
+      name: nameMatch?.[1] ?? null,
+      member_since: sinceMatch?.[1] ?? null,
+      image: imageElem?.getAttribute("src")?.replace("._V1_SY100_SX100_", "") ?? null,
+      badges: []
+    };
+
+    const badgeNodes = dom.querySelector(".badges")?.childNodes ?? [];
+    for (const node of badgeNodes) {
+      try {
+        const name = node.querySelector(".name")?.text;
+        const value = node.querySelector(".value")?.text;
+        if (name && value) {
+          data.badges.push({ name, value });
+        }
+      } catch {}
     }
 
-    try {
-      const created = rawHtml.match(
-        /<div class="timestamp">IMDb member since (.*)<\/div>/
-      )[1];
-      data.member_since = created || null;
-    } catch (__) {
-      data.created = null;
-    }
-
-    try {
-      let image = dom.getElementById("avatar");
-      const imageSrc = image.getAttribute("src");
-
-      if (imageSrc) {
-        data.image = imageSrc.replace("._V1_SY100_SX100_", "");
-      } else {
-        data.image = null;
-      }
-    } catch (__) {
-      data.image = null;
-    }
-
-    try {
-      let badges = dom.getElementsByClassName("badges")[0];
-      let mappedBadges = badges.childNodes
-        .map((node) => {
-          try {
-            return {
-              name: node.getElementsByClassName("name")[0].textContent,
-              value: node.getElementsByClassName("value")[0].textContent,
-            };
-          } catch (__) {}
-        })
-        .filter(Boolean);
-
-      data.badges = mappedBadges;
-    } catch (_) {
-      data.badges = [];
-    }
-
-    const result = Object.assign(
-      {
-        id: userId,
-        imdb: `https://www.imdb.com/user/${userId}`,
-        ratings_api_path: `/user/${userId}/ratings`,
-      },
-      data
-    );
-
-    return c.json(result);
+    return Response.json(data);
   } catch (error) {
-    c.status(errorStatus);
-    return c.json({
-      message: error.message,
-    });
+    return new Response(JSON.stringify({ message: error.message }), { status: 500 });
   }
 }

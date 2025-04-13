@@ -1,33 +1,13 @@
-import apiRequestRawHtml from "./apiRequestRawHtml";
-import DomParser from "dom-parser";
-import seriesFetcher from "./seriesFetcher";
+import apiRequestRawHtml from "./apiRequest.js";
+import { parse } from "node-html-parser";
+import seriesFetcher from "./seriesFetcher.js";
 
 export default async function getTitle(id) {
-  const parser = new DomParser();
   const html = await apiRequestRawHtml(`https://www.imdb.com/title/${id}`);
-  const dom = parser.parseFromString(html);
-  const nextData = dom.getElementsByAttribute("id", "__NEXT_DATA__");
-  const json = JSON.parse(nextData[0].textContent);
-
+  const dom = parse(html);
+  const nextData = dom.querySelector("#__NEXT_DATA__");
+  const json = JSON.parse(nextData.text);
   const props = json.props.pageProps;
-
-  const getCredits = (lookFor, v) => {
-    const result = props.aboveTheFoldData.principalCredits.find(
-      (e) => e?.category?.id === lookFor
-    );
-
-    return result
-      ? result.credits.map((e) => {
-          if (v === "2")
-            return {
-              id: e.name.id,
-              name: e.name.nameText.text,
-            };
-
-          return e.name.nameText.text;
-        })
-      : [];
-  };
 
   return {
     id: id,
@@ -36,20 +16,15 @@ export default async function getTitle(id) {
     contentType: props.aboveTheFoldData.titleType.id,
     contentRating: props.aboveTheFoldData?.certificate?.rating ?? "N/A",
     isSeries: props.aboveTheFoldData.titleType.isSeries,
-    productionStatus:
-      props.aboveTheFoldData.productionStatus.currentProductionStage.id,
-    isReleased:
-      props.aboveTheFoldData.productionStatus.currentProductionStage.id ===
-      "released",
+    productionStatus: props.aboveTheFoldData.productionStatus.currentProductionStage.id,
+    isReleased: props.aboveTheFoldData.productionStatus.currentProductionStage.id === "released",
     title: props.aboveTheFoldData.titleText.text,
     image: props.aboveTheFoldData.primaryImage.url,
     images: props.mainColumnData.titleMainImages.edges
       .filter((e) => e.__typename === "ImageEdge")
       .map((e) => e.node.url),
     plot: props.aboveTheFoldData.plot.plotText.plainText,
-    runtime:
-      props.aboveTheFoldData.runtime?.displayableProperty?.value?.plainText ??
-      "",
+    runtime: props.aboveTheFoldData.runtime?.displayableProperty?.value?.plainText ?? "",
     runtimeSeconds: props.aboveTheFoldData.runtime?.seconds ?? 0,
     rating: {
       count: props.aboveTheFoldData.ratingsSummary?.voteCount ?? 0,
@@ -67,8 +42,6 @@ export default async function getTitle(id) {
       year: props.aboveTheFoldData.releaseDate.year,
     },
     year: props.aboveTheFoldData.releaseDate.year,
-    ...(props.aboveTheFoldData.titleType.isSeries
-      ? await seriesFetcher(id)
-      : {}),
+    ...(props.aboveTheFoldData.titleType.isSeries ? await seriesFetcher(id) : {})
   };
 }
