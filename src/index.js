@@ -1,5 +1,4 @@
 import { Router } from 'itty-router';
-// import { withCache } from './helpers/cache.js';
 import index from './routes/index.js';
 import search from './routes/search.js';
 import title from './routes/title.js';
@@ -7,9 +6,6 @@ import reviews from './routes/reviews.js';
 import userRoutes from './routes/user/index.js';
 
 const router = Router();
-
-// Use correct middleware pattern
-// router.all('*', withCache().fetch);
 
 // CORS handler
 router.all('*', (req) => {
@@ -42,11 +38,31 @@ router.all('*', () =>
   })
 );
 
-// Worker export
+// Worker export with caching
 export default {
   async fetch(request, env, ctx) {
+    const cache = caches.default;
+    const cacheKey = new Request(request.url, request);
+
+    // Try to get from cache
+    let response = await cache.match(cacheKey);
+    if (response) {
+      return response;
+    }
+
     try {
-      return await router.handle(request, env, ctx);
+      // Not cached, run route handler
+      response = await router.handle(request, env, ctx);
+
+      // Cache only GET + 200 OK
+      if (request.method === 'GET' && response.status === 200) {
+        const cachedResponse = new Response(response.body, response);
+        cachedResponse.headers.set('Cache-Control', 's-maxage=600');
+        ctx.waitUntil(cache.put(cacheKey, cachedResponse.clone()));
+        return cachedResponse;
+      }
+
+      return response;
     } catch (err) {
       console.error("Unhandled Worker Error:", err);
       return new Response(JSON.stringify({ error: "Internal error", details: err.message }), {
