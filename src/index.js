@@ -43,19 +43,23 @@ export default {
   async fetch(request, env, ctx) {
     const cache = caches.default;
     const cacheKey = new Request(request.url, request);
+    const isCacheDisabled = env.CACHE_DISABLED === 'true';
 
-    // Try to get from cache
-    let response = await cache.match(cacheKey);
-    if (response) {
-      return response;
+    if (!isCacheDisabled) {
+      const cached = await cache.match(cacheKey);
+      if (cached) {
+        return cached;
+      }
     }
 
     try {
-      // Not cached, run route handler
-      response = await router.handle(request, env, ctx);
+      const response = await router.handle(request, env, ctx);
 
-      // Cache only GET + 200 OK
-      if (request.method === 'GET' && response.status === 200) {
+      if (
+        !isCacheDisabled &&
+        request.method === 'GET' &&
+        response.status === 200
+      ) {
         const cachedResponse = new Response(response.body, response);
         cachedResponse.headers.set('Cache-Control', 's-maxage=600');
         ctx.waitUntil(cache.put(cacheKey, cachedResponse.clone()));
